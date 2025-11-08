@@ -1,12 +1,16 @@
 package main
 
 import (
-	"fmt"
-	"runtime"
-	"time"
+	"goruntime_explore/middleware"
+	"log"
+	"net/http"
 
 	"github.com/shopspring/decimal"
 )
+
+type contextKey string
+
+const userIDKey contextKey = "userID"
 
 type Stats struct {
 	Goroutines int
@@ -16,71 +20,97 @@ type Stats struct {
 var balance = decimal.NewFromFloat(1000.00)
 
 func main() {
-	// Goroutine 1
-	go func() {
-		newBalance := balance.Add(decimal.NewFromFloat(100))
-		fmt.Println(newBalance) // 1100
-	}()
+	// Create main router
+	mux := http.NewServeMux()
 
-	// Goroutine 2
-	go func() {
-		newBalance := balance.Sub(decimal.NewFromFloat(50))
-		fmt.Println(newBalance) // 950
-	}()
+	// Public routes (no auth required)
+	publicRouter := http.NewServeMux()
+	publicRouter.HandleFunc("GET /health", healthHandler)
+	publicRouter.HandleFunc("GET /monsters", listMonstersHandler)
+	publicRouter.HandleFunc("GET /monsters/{id}", getMonsterHandler)
 
-	// ----
+	// Admin routes (auth required)
+	adminRouter := http.NewServeMux()
+	adminRouter.HandleFunc("POST /monsters", createMonsterHandler)
+	adminRouter.HandleFunc("PUT /monsters/{id}", updateMonsterHandler)
+	adminRouter.HandleFunc("PATCH /monsters/{id}", patchMonsterHandler)
+	adminRouter.HandleFunc("DELETE /monsters/{id}", deleteMonsterHandler)
+	// Apply middleware to admin routes
+	adminWithAuth := middleware.EnsureAuthenticated(adminRouter)
 
-	fmt.Println(balance) // 1000 (TIDAK BERUBAH)
-	// ✅ Tidak ada race condition
+	// Mount routers with versioning
+	mux.Handle("/v1/", http.StripPrefix("/v1", publicRouter))
+	mux.Handle("/v1/admin/", http.StripPrefix("/v1/admin", adminWithAuth))
 
-	fmt.Println("=== Go Runtime Demo ==")
+	// Create middleware stack
+	stack := middleware.CreateStack(
+		middleware.Logging,
+	)
 
-	// // Spawn goroutines
-	// for i := 0; i < 5; i++ {
-	// 	go worker(i)
-	// }
-
-	// // Monitor runtime stats
-	// for j := 0; j < 10; j++ {
-	// 	stats := getStats()
-	// 	fmt.Printf("Tick %d: Goroutines=%d, Memory=%dKB\n",
-	// 		j, stats.Goroutines, stats.Memory/1024)
-	// 	time.Sleep(500 * time.Millisecond)
-	// }
-}
-
-func worker(_ int) {
-	for {
-		// Allocate memory (trigger GC)
-		data := make([]byte, 1024*100) // 100KB
-		_ = data
-		time.Sleep(200 * time.Millisecond)
+	// Wrap entire router with middleware
+	server := &http.Server{
+		Addr:    ":8080",
+		Handler: stack(mux),
 	}
+
+	log.Println("Server starting on :8080")
+	log.Fatal(server.ListenAndServe())
+
 }
 
-func getStats() Stats {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
+}
 
-	return Stats{
-		Goroutines: runtime.NumGoroutine(),
-		Memory:     m.Alloc,
+func listMonstersHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	newBalance := balance.Add(decimal.NewFromFloat(100))
+	log.Println(newBalance) // 1100
+
+	log.Println(balance) // 1000
+
+	w.Write([]byte("List of monsters"))
+}
+
+func getMonsterHandler(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Monster ID: " + id))
+}
+
+func createMonsterHandler(w http.ResponseWriter, r *http.Request) {
+	// Get userID from context (set by middleware)
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
 	}
+
+	w.WriteHeader(http.StatusCreated)
+	w.Write([]byte("Monster created by user: " + userID))
 }
 
-// **Output:**
-// ```
-// === Go Runtime Demo ===
+func updateMonsterHandler(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	userID, _ := r.Context().Value(userIDKey).(string)
 
-// Tick 0: Goroutines=6, Memory=482KB   ← Start
-// Tick 1: Goroutines=6, Memory=1731KB  ← Workers allocate memory
-// Tick 2: Goroutines=6, Memory=3083KB  ← Memory keeps growing
-// Tick 3: Goroutines=6, Memory=191KB   ← GC TRIGGERED! Memory cleaned
-// Tick 4: Goroutines=6, Memory=1233KB  ← Allocate again
-// Tick 5: Goroutines=6, Memory=2793KB  ← Growing...
-// Tick 6: Goroutines=6, Memory=3834KB  ← Peak
-// Tick 7: Goroutines=6, Memory=1652KB  ← GC cleaned some
-// Tick 8: Goroutines=6, Memory=2694KB  ← Growing again
-// Tick 9: Goroutines=6, Memory=508KB   ← GC TRIGGERED again
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Monster " + id + " updated by user: " + userID))
+}
 
-// -------------
+func patchMonsterHandler(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	userID, _ := r.Context().Value(userIDKey).(string)
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Monster " + id + " patched by user: " + userID))
+}
+
+func deleteMonsterHandler(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	userID, _ := r.Context().Value(userIDKey).(string)
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Monster " + id + " deleted by user: " + userID))
+}
